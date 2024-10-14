@@ -1,1 +1,158 @@
+import re
+from docx import Document  # For .docx parsing
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+# Load the .docx file
+def load_docx(file_path):
+    """Loads the .docx file and extracts text from all paragraphs."""
+    doc = Document(file_path)
+    full_text = []
+    for para in doc.paragraphs:
+        full_text.append(para.text)
+    return '\n'.join(full_text)
+
+# Preprocess the text (Basic chunking and cleaning)
+def preprocess_text(text):
+    """Cleans the text by removing extra spaces and special characters."""
+    cleaned_text = re.sub(r'\s+', ' ', text)
+    return cleaned_text
+
+# Chunk text for better processing (This avoids hallucinations by giving the model shorter chunks)
+def chunk_text(text, chunk_size=1000):
+    """Splits the text into smaller chunks of defined size."""
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+# Function to retrieve relevant chunks based on a query
+def retrieve_relevant_chunks(query, text_chunks):
+    """Retrieves the most relevant chunks from the document based on the query using TF-IDF and cosine similarity."""
+    vectorizer = TfidfVectorizer().fit_transform([query] + text_chunks)
+    vectors = vectorizer.toarray()
+
+    # Calculate cosine similarity between the query and each chunk
+    cosine_similarities = cosine_similarity([vectors[0]], vectors[1:])[0]
+
+    # Return top 3 most relevant chunks to avoid overloading the model (Helps in mitigating hallucinations)
+    top_indices = cosine_similarities.argsort()[-3:][::-1]
+    relevant_chunks = [text_chunks[i] for i in top_indices]
+    
+    return " ".join(relevant_chunks)
+
+# Load and Initialize the model
+def initialize_model():
+    """Initializes the BART large CNN model for summarization."""
+    model_name = "facebook/bart-large-cnn"
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
+    return summarizer
+
+# Summarize the relevant chunks
+def summarize_chunks(summarizer, relevant_chunks):
+    """Summarizes the relevant chunks using the initialized model."""
+    return summarizer(relevant_chunks, max_length=200, min_length=50, do_sample=True)[0]['summary_text']
+
+# Mitigate hallucination using cross-referencing (Second mitigation technique)
+def cross_reference_summary(summary, text_chunks):
+    """Cross-references the summary with the original chunks using cosine similarity to mitigate hallucination."""
+    vectorizer = TfidfVectorizer().fit_transform([summary] + text_chunks)
+    vectors = vectorizer.toarray()
+
+    # Recalculate cosine similarity between the summary and original chunks
+    cosine_similarities = cosine_similarity([vectors[0]], vectors[1:])[0]
+
+    # If the summary doesn't match any chunk with high confidence, flag it
+    if max(cosine_similarities) < 0.5:
+        return "The generated summary may be inaccurate. Please cross-check the source."
+    
+    return summary
+
+# Structured function call to extract the effective date
+def extract_effective_date(text):
+    """Extracts the effective date using regex from the document text."""
+    # Regular expression to match effective date formats
+    date_pattern = r'(\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|' \
+                   r'Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|' \
+                    r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b|' \
+                   r'\b(?:\d{4}-\d{2}-\d{2})\b|' \
+                   r'\b(?:\d{2}/\d{2}/\d{4})\b)'
+    match = re.search(date_pattern, text, re.IGNORECASE)
+    if match:
+        return match.group(0)
+    return "Effective date not found in the document."
+
+# Main function to run summarization and date extraction
+def process_document(file_path, query):
+    """Main function that processes the document and retrieves the relevant information based on the query."""
+    # Load the .docx file
+    docx_text = load_docx(file_path)
+
+    # Preprocess and chunk the text
+    cleaned_text = preprocess_text(docx_text)
+    text_chunks = chunk_text(cleaned_text)
+
+    # Initialize the model
+    summarizer = initialize_model()
+
+    # Retrieve relevant chunks
+    relevant_chunks = retrieve_relevant_chunks(query, text_chunks)
+
+    # Summarize the chunks
+    summary = summarize_chunks(summarizer, relevant_chunks)
+
+    # Mitigate hallucination using cross-referencing
+    final_summary = cross_reference_summary(summary, text_chunks)
+
+    # Extract the effective date using function calling
+    effective_date = extract_effective_date(docx_text)
+
+    return final_summary, effective_date
+
+# Interactive Bot with IPyWidgets
+
+# Widgets for file path and query
+file_path_widget = widgets.Text(
+    value='',
+    placeholder='Enter the path to the .docx file',
+    description='File Path:',
+    disabled=False
+)
+
+query_widget = widgets.Text(
+    value='',
+    placeholder='Enter your query',
+    description='Query:',
+    disabled=False
+)
+
+# Button to trigger processing
+process_button = widgets.Button(description="Process Document")
+
+# Output area
+output_area = widgets.Output()
+
+# Function to handle button click
+def on_button_click(b):
+    with output_area:
+        clear_output()  # Clear previous output
+        file_path = file_path_widget.value
+        query = query_widget.value
+        if file_path and query:
+            try:
+                summary, effective_date = process_document(file_path, query)
+                print(f"Summary of the document: {summary}")
+                print(f"Extracted Effective Date: {effective_date}")
+            except Exception as e:
+                print(f"Error: {e}")
+        else:
+            print("Please enter both the file path and query.")
+
+# Bind the button click event
+process_button.on_click(on_button_click)
+
+# Display widgets and output area
+display(file_path_widget, query_widget, process_button, output_area)
 
